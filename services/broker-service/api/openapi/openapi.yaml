@@ -1,0 +1,429 @@
+openapi: 3.1.1
+info:
+  title: Hawk Gateway Broker API
+  version: 0.1.0
+  summary: Health and operational contract for the Hawk API gateway broker.
+  description: >
+    Contract-first API surface for the Hawk gateway broker. The MVP surface
+    exposes health probes for platform orchestration and operators. Downstream
+    business routing remains owned by the service-specific contracts.
+  contact:
+    name: Hawk Platform Engineering
+servers:
+  - url: https://api.hawk.local
+    description: Local or environment-specific gateway base URL.
+tags:
+  - name: Health
+    description: Process, readiness, and dependency health probes.
+paths:
+  /healthz:
+    get:
+      tags:
+        - Health
+      operationId: getGatewayHealth
+      summary: Get gateway health summary.
+      description: >
+        Returns a compact operational view of the gateway process and selected
+        dependencies. This endpoint is suitable for dashboards and manual
+        diagnostics. It may report warn when non-critical dependencies are
+        degraded, but callers should use /healthz/readiness for traffic routing
+        decisions and /healthz/liveness for restart decisions.
+      security: []
+      responses:
+        "200":
+          description: Gateway is alive. The response status can be pass or warn.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/health+json:
+              schema:
+                $ref: "#/components/schemas/HealthReport"
+              examples:
+                degradedDownstream:
+                  $ref: "#/components/examples/HealthSummaryWarn"
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthReport"
+        "503":
+          $ref: "#/components/responses/HealthUnavailable"
+  /healthz/liveness:
+    get:
+      tags:
+        - Health
+      operationId: getGatewayLiveness
+      summary: Check whether the gateway process should keep running.
+      description: >
+        Minimal probe for container orchestration. Liveness must not depend on
+        PostgreSQL, Redis, Kafka, OpenTelemetry, Keycloak, or downstream services.
+        It should only fail when the process is unable to make forward progress
+        and should be restarted.
+      security: []
+      responses:
+        "200":
+          description: Gateway process is alive.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/health+json:
+              schema:
+                $ref: "#/components/schemas/HealthReport"
+              examples:
+                live:
+                  $ref: "#/components/examples/LivenessPass"
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthReport"
+        "503":
+          $ref: "#/components/responses/HealthUnavailable"
+  /healthz/readiness:
+    get:
+      tags:
+        - Health
+      operationId: getGatewayReadiness
+      summary: Check whether the gateway can receive traffic.
+      description: >
+        Readiness reflects only dependencies required for the gateway to accept
+        and safely process requests. For the MVP this includes route configuration,
+        PostgreSQL route storage, Redis-backed token/nonce/rate-limit operations,
+        and JWT verification material when authentication is enabled. Kafka,
+        OpenTelemetry exporters, and individual downstream service health should
+        not normally make readiness fail unless a deployment explicitly makes
+        them request-critical.
+      security: []
+      responses:
+        "200":
+          description: Gateway is ready to receive traffic.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/health+json:
+              schema:
+                $ref: "#/components/schemas/HealthReport"
+              examples:
+                ready:
+                  $ref: "#/components/examples/ReadinessPass"
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthReport"
+        "503":
+          $ref: "#/components/responses/HealthUnavailable"
+components:
+  headers:
+    NoStore:
+      description: Health responses are point-in-time observations and must not be cached.
+      schema:
+        type: string
+        const: no-store
+      example: no-store
+  responses:
+    HealthUnavailable:
+      description: Gateway health check failed.
+      headers:
+        Cache-Control:
+          $ref: "#/components/headers/NoStore"
+      content:
+        application/health+json:
+          schema:
+            $ref: "#/components/schemas/HealthReport"
+          examples:
+            notReady:
+              $ref: "#/components/examples/ReadinessFail"
+        application/json:
+          schema:
+            $ref: "#/components/schemas/HealthReport"
+  schemas:
+    HealthReport:
+      type: object
+      additionalProperties: false
+      required:
+        - status
+        - serviceId
+        - version
+        - releaseId
+        - description
+        - timestamp
+      properties:
+        status:
+          $ref: "#/components/schemas/HealthStatus"
+        serviceId:
+          type: string
+          description: Stable service identifier used in logs, metrics, and traces.
+          examples:
+            - hawk-gateway-broker
+        version:
+          type: string
+          description: Semantic application version.
+          examples:
+            - 0.1.0
+        releaseId:
+          type: string
+          description: Build, image, or deployment release identifier.
+          examples:
+            - rel-gateway-99a4c2
+        description:
+          type: string
+          examples:
+            - Core routing and security gateway broker.
+        timestamp:
+          type: string
+          format: date-time
+          description: Time when this health report was produced.
+        traceId:
+          type: string
+          description: Current trace identifier when a trace context exists.
+          examples:
+            - 4bf92f3577b34da6a3ce929d0e0e4736
+        uptimeSeconds:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Process uptime in seconds.
+        notes:
+          type: array
+          items:
+            type: string
+          description: Human-readable notes about the current health state.
+        checks:
+          type: object
+          description: >
+            Dependency and sub-component checks. Keys are stable logical names,
+            not host names. Values are arrays to support clustered dependencies
+            while preserving one schema for single-node checks.
+          additionalProperties:
+            type: array
+            minItems: 1
+            items:
+              $ref: "#/components/schemas/ComponentCheck"
+    ComponentCheck:
+      type: object
+      additionalProperties: false
+      required:
+        - status
+        - componentId
+        - componentType
+        - time
+      properties:
+        status:
+          $ref: "#/components/schemas/HealthStatus"
+        componentId:
+          type: string
+          description: Stable component identifier. Avoid hostnames, IPs, and secrets.
+          examples:
+            - pg-routes-primary
+        componentType:
+          $ref: "#/components/schemas/ComponentType"
+        time:
+          type: string
+          format: date-time
+          description: Time when the component check completed.
+        observedValue:
+          type: number
+          description: Numeric observation, usually latency or queue depth.
+          examples:
+            - 4
+        observedUnit:
+          type: string
+          description: Unit for observedValue.
+          examples:
+            - ms
+        output:
+          type: string
+          description: Short sanitized operator-facing detail for fail or warn states.
+          examples:
+            - PostgreSQL route lookup timed out.
+        links:
+          type: object
+          additionalProperties:
+            type: string
+            format: uri
+          description: Operator links such as runbooks or dashboards.
+        attributes:
+          type: object
+          description: Low-cardinality OpenTelemetry-aligned attributes.
+          additionalProperties:
+            oneOf:
+              - type: string
+              - type: number
+              - type: boolean
+          examples:
+            - db.system: postgresql
+              db.operation.name: select
+              hawk.dependency.critical: true
+    HealthStatus:
+      type: string
+      enum:
+        - pass
+        - warn
+        - fail
+      description: >
+        pass means healthy, warn means degraded but usable, and fail means not
+        healthy for the endpoint's purpose.
+    ComponentType:
+      type: string
+      enum:
+        - component
+        - datastore
+        - messaging
+        - cache
+        - security
+        - configuration
+        - observability
+        - system
+      description: Logical kind of checked component.
+  examples:
+    HealthSummaryWarn:
+      summary: Gateway alive with one downstream degraded.
+      value:
+        status: warn
+        serviceId: hawk-gateway-broker
+        version: 0.1.0
+        releaseId: rel-gateway-99a4c2
+        description: Core routing and security gateway broker.
+        timestamp: "2026-07-06T22:20:15Z"
+        uptimeSeconds: 86400
+        traceId: 4bf92f3577b34da6a3ce929d0e0e4736
+        notes:
+          - Non-critical downstream finance route is degraded.
+        checks:
+          process:
+            - componentId: gateway-http-server
+              componentType: system
+              status: pass
+              time: "2026-07-06T22:20:15Z"
+              observedValue: 2
+              observedUnit: ms
+          local-postgres-routes:
+            - componentId: pg-routes-primary
+              componentType: datastore
+              status: pass
+              time: "2026-07-06T22:20:14Z"
+              observedValue: 4
+              observedUnit: ms
+              attributes:
+                db.system: postgresql
+                db.operation.name: select
+                hawk.dependency.critical: true
+          redis-security-cache:
+            - componentId: redis-security-cache
+              componentType: cache
+              status: pass
+              time: "2026-07-06T22:20:13Z"
+              observedValue: 1
+              observedUnit: ms
+              attributes:
+                db.system: redis
+                hawk.dependency.critical: true
+          kafka-events:
+            - componentId: kafka-main
+              componentType: messaging
+              status: warn
+              time: "2026-07-06T22:20:15Z"
+              output: Kafka is configured for future event integration but is not MVP request-critical.
+              observedValue: 18
+              observedUnit: ms
+              attributes:
+                messaging.system: kafka
+                hawk.dependency.critical: false
+          downstream-finance:
+            - componentId: srv-finance-http
+              componentType: component
+              status: warn
+              time: "2026-07-06T22:20:14Z"
+              output: High response latency detected on downstream finance endpoint.
+              observedValue: 920
+              observedUnit: ms
+              links:
+                runbook: https://ops.example.internal/runbooks/finance-service-triage
+              attributes:
+                rpc.system: http
+                rpc.service: finance
+                hawk.dependency.critical: false
+    LivenessPass:
+      summary: Process can keep running.
+      value:
+        status: pass
+        serviceId: hawk-gateway-broker
+        version: 0.1.0
+        releaseId: rel-gateway-99a4c2
+        description: Gateway process liveness.
+        timestamp: "2026-07-06T22:20:15Z"
+        uptimeSeconds: 86400
+        checks:
+          process:
+            - componentId: gateway-http-server
+              componentType: system
+              status: pass
+              time: "2026-07-06T22:20:15Z"
+              observedValue: 1
+              observedUnit: ms
+    ReadinessPass:
+      summary: Gateway can receive traffic.
+      value:
+        status: pass
+        serviceId: hawk-gateway-broker
+        version: 0.1.0
+        releaseId: rel-gateway-99a4c2
+        description: Gateway traffic readiness.
+        timestamp: "2026-07-06T22:20:15Z"
+        checks:
+          route-configuration:
+            - componentId: route-table
+              componentType: configuration
+              status: pass
+              time: "2026-07-06T22:20:15Z"
+              attributes:
+                hawk.routes.loaded: true
+                hawk.dependency.critical: true
+          local-postgres-routes:
+            - componentId: pg-routes-primary
+              componentType: datastore
+              status: pass
+              time: "2026-07-06T22:20:14Z"
+              observedValue: 4
+              observedUnit: ms
+              attributes:
+                db.system: postgresql
+                db.operation.name: select
+                hawk.dependency.critical: true
+          redis-security-cache:
+            - componentId: redis-security-cache
+              componentType: cache
+              status: pass
+              time: "2026-07-06T22:20:13Z"
+              observedValue: 1
+              observedUnit: ms
+              attributes:
+                db.system: redis
+                hawk.dependency.critical: true
+          jwt-verification:
+            - componentId: keycloak-jwks-cache
+              componentType: security
+              status: pass
+              time: "2026-07-06T22:20:14Z"
+              attributes:
+                hawk.jwks.cache_valid: true
+                hawk.dependency.critical: true
+    ReadinessFail:
+      summary: Gateway cannot safely receive traffic.
+      value:
+        status: fail
+        serviceId: hawk-gateway-broker
+        version: 0.1.0
+        releaseId: rel-gateway-99a4c2
+        description: Gateway traffic readiness.
+        timestamp: "2026-07-06T22:20:15Z"
+        checks:
+          redis-security-cache:
+            - componentId: redis-security-cache
+              componentType: cache
+              status: fail
+              time: "2026-07-06T22:20:15Z"
+              output: Redis nonce write failed.
+              observedValue: 2000
+              observedUnit: ms
+              attributes:
+                db.system: redis
+                hawk.dependency.critical: true
